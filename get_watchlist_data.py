@@ -9,7 +9,10 @@ import argparse
 import os
 import platform
 import time
+import io
+import math
 import requests
+from PIL import Image
 from dotenv import load_dotenv
 
 from selenium import webdriver
@@ -79,6 +82,87 @@ def capture_element_screenshot(driver, xpath, out_path, timeout=15):
     time.sleep(0.3)
     # save element-only screenshot
     elem.screenshot(out_path)
+    return out_path
+
+
+def capture_element_full(driver, xpath, out_path, timeout=15, max_single_height=15000):
+    """Capture the full element even if it is larger than the viewport.
+
+    Attempts a single full-page screenshot by resizing the window when the
+    document height is reasonable; otherwise falls back to tiled scrolling
+    and stitching.
+    """
+    wait = WebDriverWait(driver, timeout)
+    elem = wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
+
+    metrics = driver.execute_script(
+        "var e=arguments[0];var r=e.getBoundingClientRect();return {left:r.left,top:r.top,width:r.width,height:r.height,scrollY:window.scrollY,docHeight:Math.max(document.documentElement.scrollHeight, document.body.scrollHeight),docWidth:Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),viewportHeight:window.innerHeight,viewportWidth:window.innerWidth};",
+        elem,
+    )
+
+    elem_top = int(metrics["top"] + metrics["scrollY"])
+    elem_left = int(metrics["left"])
+    elem_width = int(math.ceil(metrics["width"]))
+    elem_height = int(math.ceil(metrics["height"]))
+    doc_height = int(metrics["docHeight"])
+    doc_width = int(metrics["docWidth"])
+
+    # Try single-shot full-page capture if page height is not too large
+    if doc_height <= max_single_height:
+        orig_size = driver.get_window_size()
+        try:
+            driver.set_window_size(max(doc_width, 800), max(doc_height, 600))
+            png = driver.get_screenshot_as_png()
+            img = Image.open(io.BytesIO(png)).convert("RGB")
+            crop = img.crop((elem_left, elem_top, elem_left + elem_width, elem_top + elem_height))
+            crop.save(out_path)
+            return out_path
+        finally:
+            try:
+                driver.set_window_size(orig_size["width"], orig_size["height"])
+            except Exception:
+                pass
+
+    # Otherwise perform tiled capture while scrolling and stitch
+    viewport_h = int(metrics["viewportHeight"])
+    viewport_w = int(metrics["viewportWidth"])
+
+    start_y = elem_top
+    end_y = elem_top + elem_height
+
+    # Determine scroll positions (tile top positions)
+    tiles = []
+    y = max(0, start_y - (start_y % viewport_h))
+    while y < end_y:
+        tiles.append(y)
+        y += viewport_h
+
+    stitched = Image.new("RGB", (elem_width, elem_height))
+    pasted_any = False
+    for scroll_y in tiles:
+        driver.execute_script(f"window.scrollTo(0, {scroll_y});")
+        time.sleep(0.3)
+        png = driver.get_screenshot_as_png()
+        img = Image.open(io.BytesIO(png)).convert("RGB")
+
+        rel_top = elem_top - scroll_y
+        crop_top = max(0, rel_top)
+        crop_bottom = min(viewport_h, rel_top + elem_height)
+
+        if crop_bottom <= crop_top:
+            continue
+
+        # crop within the viewport image
+        crop = img.crop((elem_left, crop_top, elem_left + elem_width, crop_bottom))
+
+        paste_y = max(0, scroll_y - start_y)
+        stitched.paste(crop, (0, paste_y))
+        pasted_any = True
+
+    if not pasted_any:
+        raise RuntimeError("Failed to capture element by tiled stitching")
+
+    stitched.save(out_path)
     return out_path
 
 
@@ -163,6 +247,7 @@ def main():
     parser.add_argument("--xpath", default="/html/body/div[2]/div/div[6]/div/div[2]/div[1]/div[1]/div[1]/div[2]/div", help="XPath of element to screenshot")
     parser.add_argument("--headless", action="store_true", help="Run Chrome headless")
     parser.add_argument("--screenshot-path", default="watchlist_screenshot.png", help="Path to save screenshot")
+    parser.add_argument("--full", action="store_true", help="Capture full element (single-shot or stitched) when element is larger than viewport")
     parser.add_argument("--token", default=os.getenv("TELEGRAM_BOT_TOKEN"), help="Telegram bot token")
     parser.add_argument("--chat", default=os.getenv("TELEGRAM_CHAT_ID"), help="Telegram chat id")
     parser.add_argument("--no-send", action="store_true", help="Do NOT send screenshot to Telegram (default: send)")
