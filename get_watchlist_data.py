@@ -166,6 +166,45 @@ def capture_element_full(driver, xpath, out_path, timeout=15, max_single_height=
     return out_path
 
 
+
+def capture_full_div(driver, xpath, out_path, timeout=15):
+    """
+    Capture the full content of a div, even if it's scrollable.
+    This expands the element's height to its scrollHeight and resizes the window if needed.
+    """
+    wait = WebDriverWait(driver, timeout)
+    elem = wait.until(EC.presence_of_element_located((By.XPATH, xpath)))
+    
+    # Scroll into view initially
+    driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", elem)
+    time.sleep(1.0)
+
+    # Get dimensions
+    scroll_height = driver.execute_script("return arguments[0].scrollHeight", elem)
+    scroll_width = driver.execute_script("return arguments[0].scrollWidth", elem)
+    
+    # Expand the element
+    driver.execute_script("""
+        var el = arguments[0];
+        el.style.height = el.scrollHeight + 'px';
+        el.style.maxHeight = 'none';
+        el.style.overflow = 'hidden'; // Hide scrollbars since we are expanding
+    """, elem)
+    time.sleep(0.5)
+    
+    # Resize window if needed to fit the element
+    # We add some padding to be safe
+    window_width = max(driver.get_window_size()['width'], scroll_width + 100)
+    window_height = max(driver.get_window_size()['height'], scroll_height + 200)
+    
+    driver.set_window_size(window_width, window_height)
+    time.sleep(0.5)
+    
+    # Take screenshot
+    elem.screenshot(out_path)
+    return out_path
+
+
 def send_telegram_photo(token, chat_id, image_path, caption=None):
     url = f"https://api.telegram.org/bot{token}/sendPhoto"
     with open(image_path, "rb") as f:
@@ -284,7 +323,8 @@ def main():
             return
 
         print(f"Capturing element by XPath: {args.xpath}")
-        screenshot_path = capture_element_screenshot(driver, args.xpath, args.screenshot_path)
+        # Use capture_full_div by default as it handles both normal and scrollable elements better
+        screenshot_path = capture_full_div(driver, args.xpath, args.screenshot_path)
         print(f"Screenshot saved to: {screenshot_path}")
 
         # By default the script sends the screenshot. Use --no-send to opt out.
